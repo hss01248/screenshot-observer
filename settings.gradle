@@ -1,0 +1,5 @@
+include ':mylibrary2'
+include ':demo'
+include ':observer'
+
+rootProject.name = "screenshot-observer"
