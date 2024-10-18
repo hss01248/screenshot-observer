@@ -2,6 +2,7 @@ package com.hss01248.media.observer;
 
 import android.content.ContentUris;
 import android.content.Context;
+import android.content.pm.ApplicationInfo;
 import android.database.ContentObserver;
 import android.database.Cursor;
 import android.graphics.BitmapFactory;
@@ -16,8 +17,7 @@ import android.util.Log;
 import android.view.Display;
 import android.view.WindowManager;
 
-import com.blankj.utilcode.util.LogUtils;
-import com.blankj.utilcode.util.ThreadUtils;
+
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -48,7 +48,15 @@ public class ScreenShotListenManagerBelowAndroid14 {
     };
 
     private static Point sScreenRealSize;
-
+    public  boolean isAppDebuggable() {
+        try {
+            ApplicationInfo info = mContext.getApplicationInfo();
+            return (info.flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
     /**
      * 已回调过的路径
      */
@@ -85,9 +93,14 @@ public class ScreenShotListenManagerBelowAndroid14 {
         if (sScreenRealSize == null) {
             sScreenRealSize = getRealScreenSize();
             if (sScreenRealSize != null) {
-                Log.d(TAG, "Screen Real Size: " + sScreenRealSize.x + " * " + sScreenRealSize.y);
+                if(isAppDebuggable()){
+                    Log.d(TAG, "Screen Real Size: " + sScreenRealSize.x + " * " + sScreenRealSize.y);
+                }
+
             } else {
-                Log.w(TAG, "Get screen real size failed.");
+                if(isAppDebuggable()){
+                    Log.w(TAG, "Get screen real size failed.");
+                }
             }
         }
     }
@@ -217,14 +230,19 @@ public class ScreenShotListenManagerBelowAndroid14 {
 
 
             if (cursor == null) {
-                Log.e(TAG, "Deviant logic.");
+                if(isAppDebuggable()){
+                    Log.e(TAG, "Deviant logic. cursor == null");
+                }
                 return;
             }
             if (!cursor.moveToFirst()) {
-                Log.d(TAG, "Cursor no data. 大概率是因为没有权限");
+                if(isAppDebuggable()){
+                    Log.d(TAG, "Cursor no data. 大概率是因为没有权限");
+                }
+
                 if (mListener != null && !checkCallback("")) {
                     mListener.onShot(null,false);
-                    ThreadUtils.getMainHandler().postDelayed(new Runnable() {
+                    new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
                         @Override
                         public void run() {
                             sHasCallbackPaths.remove("");
@@ -287,15 +305,20 @@ public class ScreenShotListenManagerBelowAndroid14 {
      */
     private void handleMediaRowData(String data, long dateTaken, int width, int height,Uri contentUri0) {
         if (checkScreenShot(data, dateTaken, width, height,contentUri0)) {
-            Log.d(TAG, "ScreenShot: path = " + data + "; size = " + width + " * " + height
-                    + "; date = " + dateTaken);
+            if(isAppDebuggable()){
+                Log.d(TAG, "ScreenShot: path = " + data + "; size = " + width + " * " + height
+                        + "; date = " + dateTaken);
+            }
+
             if (mListener != null && !checkCallback(data)) {
                 mListener.onShot(data,true);
             }
         } else {
             // 如果在观察区间媒体数据库有数据改变，又不符合截屏规则，则输出到 log 待分析
-            Log.w(TAG, "Media content changed, but not screenshot: path = " + data
-                    + "; size = " + width + " * " + height + "; date = " + dateTaken);
+            if(isAppDebuggable()){
+                Log.w(TAG, "Media content changed, but not screenshot: path = " + data
+                        + "; size = " + width + " * " + height + "; date = " + dateTaken);
+            }
         }
     }
 
@@ -345,8 +368,10 @@ public class ScreenShotListenManagerBelowAndroid14 {
      */
     private boolean checkCallback(String imagePath) {
         if (sHasCallbackPaths.contains(imagePath)) {
-            Log.d(TAG, "ScreenShot: imgPath has done"
-                    + "; imagePath = " + imagePath);
+            if(isAppDebuggable()){
+                Log.d(TAG, "ScreenShot: imgPath has done"
+                        + "; imagePath = " + imagePath);
+            }
             return true;
         }
         // 大概缓存15~20条记录便可
@@ -433,7 +458,10 @@ public class ScreenShotListenManagerBelowAndroid14 {
         @Override
         public void onChange(boolean selfChange) {
             super.onChange(selfChange);
-            LogUtils.d("监测到MediaContent change: selfChange:"+selfChange, mContentUri,this.toString());
+            if(isAppDebuggable()){
+                Log.d("MediaContent","监测到MediaContent change: selfChange:"+selfChange+", " +mContentUri+", " +this.toString());
+            }
+
             handleMediaContentChange(mContentUri);
         }
     }
