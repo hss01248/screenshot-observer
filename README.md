@@ -48,6 +48,26 @@ https://github.com/DoubleD0721/Screenshot
 
 # 使用
 
+
+
+```gr
+dependencyResolutionManagement {
+		repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+		repositories {
+			mavenCentral()
+			maven { url 'https://jitpack.io' }
+		}
+	}
+
+
+dependencies {
+	        implementation 'com.github.hss01248.screenshot-observer:observer:1.0.0'
+	}
+
+```
+
+
+
 ### 在activity的onResume里注册监听,在onPause()里取消监听:
 
 ```java
