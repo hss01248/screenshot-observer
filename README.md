@@ -71,21 +71,21 @@ dependencies {
 ### 在activity的onResume里注册监听,在onPause()里取消监听:
 
 ```java
-    @Override
-    protected void onResume() {
-        super.onResume();
-        ScreenshotObserverUtil.registerObserver(this, new ScreenshotCallback() {
-            @Override
-            public void onCapture(@Nullable Uri uri,boolean sure) {
-                LogUtils.i("检测到截屏:"+uri,"是否100%肯定:"+sure);
-            }
-        });
-    }
+     @Override
+        protected void onStart() {
+            super.onStart();
+            ScreenshotObserverUtil.registerObserver(this, new ScreenshotCallback() {
+                @Override
+                public void onCapture(@Nullable Uri uri,boolean sure) {
+                    LogUtils.i("检测到截屏:"+uri,"是否100%肯定:"+sure);
+                }
+            });
+        }
 
-    @Override
-    protected void onPause() {
-        super.onPause();
-        ScreenshotObserverUtil.unRegisterObserver(this);
-    }
+        @Override
+        protected void onStop() {
+            super.onStop();
+            ScreenshotObserverUtil.unRegisterObserver(this);
+        }
 ```
 

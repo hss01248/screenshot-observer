@@ -331,6 +331,10 @@ public class ScreenShotListenManagerBelowAndroid14 {
          */
         // 如果加入数据库的时间在开始监听之前, 或者与当前时间相差大于10秒, 则认为当前没有截屏
         if (dateTaken < mStartListenTime || (System.currentTimeMillis() - dateTaken) > 10 * 1000) {
+            if(isAppDebuggable()){
+                Log.i(TAG, "加入数据库的时间在开始监听之前, 或者与当前时间相差大于10秒, 则认为当前没有截屏: path = " + data
+                        + "; size = " + width + " * " + height + "; date = " + dateTaken);
+            }
             return false;
         }
 
@@ -338,25 +342,53 @@ public class ScreenShotListenManagerBelowAndroid14 {
          * 判断依据二: 尺寸判断
          */
         if (sScreenRealSize != null) {
-            // 如果图片尺寸超出屏幕, 则认为当前没有截屏
-            if (!((width <= sScreenRealSize.x && height <= sScreenRealSize.y)
-                    || (height <= sScreenRealSize.x && width <= sScreenRealSize.y))) {
-                return false;
+            if(width == sScreenRealSize.x && height >= sScreenRealSize.y){
+                //有滚动截屏的情况
+                if(isAppDebuggable()){
+                    if(height > sScreenRealSize.y){
+                        Log.i(TAG, "检测到有滚动截屏的情况: path = " + data
+                                + "; size = " + width + " * " + height + "; sScreenRealSize = " + sScreenRealSize);
+                    }
+                }
+            }else {
+                // 如果图片尺寸超出屏幕, 则认为当前没有截屏
+                if (!((width <= sScreenRealSize.x && height <= sScreenRealSize.y)
+                        || (height <= sScreenRealSize.x && width <= sScreenRealSize.y))) {
+
+                    if(isAppDebuggable()){
+                        Log.i(TAG, "图片尺寸超出屏幕, 则认为当前没有截屏: path = " + data
+                                + "; size = " + width + " * " + height + "; sScreenRealSize = " + sScreenRealSize);
+                    }
+                    return false;
+                }
             }
+
         }
 
         /*
          * 判断依据三: 路径判断
          */
         if (TextUtils.isEmpty(data)) {
+            if(isAppDebuggable()){
+                Log.i(TAG, "路径为空, 则认为当前没有截屏: path = " + data
+                        + "; size = " + width + " * " + height + "; sScreenRealSize = " + sScreenRealSize);
+            }
             return false;
         }
         data = data.toLowerCase();
         // 判断图片路径是否含有指定的关键字之一, 如果有, 则认为当前截屏了
         for (String keyWork : KEYWORDS) {
             if (data.contains(keyWork)) {
+                if(isAppDebuggable()){
+                    Log.i(TAG, "截屏判断命中: path = " + data
+                            + "; size = " + width + " * " + height + "; sScreenRealSize = " + sScreenRealSize+",date:"+dateTaken);
+                }
                 return true;
             }
+        }
+        if(isAppDebuggable()){
+            Log.i(TAG, "没有包含screen shoot,capture等字样,不是截屏: path = " + data
+                    + "; size = " + width + " * " + height + "; sScreenRealSize = " + sScreenRealSize);
         }
 
         return false;
