@@ -1,5 +1,6 @@
 package com.hss01248.media.observer;
 
+import android.content.ContentResolver;
 import android.content.ContentUris;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
@@ -9,7 +10,9 @@ import android.graphics.BitmapFactory;
 import android.graphics.Point;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.provider.MediaStore;
 import android.text.TextUtils;
@@ -64,9 +67,12 @@ public class ScreenShotListenManagerBelowAndroid14 {
 
     private Context mContext;
 
-    private OnScreenShotListener mListener;
+    private volatile OnScreenShotListener mListener;
 
-    private long mStartListenTime;
+    /** 是否处于监听中；stop 后已在执行的 query 据此跳过回调 */
+    private volatile boolean mListening;
+
+    private volatile long mStartListenTime;
 
     /**
      * 内部存储器内容观察者
@@ -82,6 +88,12 @@ public class ScreenShotListenManagerBelowAndroid14 {
      * 运行在 UI 线程的 Handler, 用于运行监听器回调
      */
     private final Handler mUiHandler = new Handler(Looper.getMainLooper());
+
+    /**
+     * 后台线程：ContentObserver.onChange 与 MediaStore query 在此执行，避免主线程 Binder 阻塞导致 ANR
+     */
+    private HandlerThread mWorkThread;
+    private Handler mWorkHandler;
 
     private ScreenShotListenManagerBelowAndroid14(Context context) {
         if (context == null) {
@@ -104,30 +116,72 @@ public class ScreenShotListenManagerBelowAndroid14 {
             }
         }
     }
-   static ScreenShotListenManagerBelowAndroid14 screenShotListenManager;
-    public static ScreenShotListenManagerBelowAndroid14 getInstance(Context context) {
-        if(screenShotListenManager == null){
-            //assertInMainThread();
-            screenShotListenManager = new ScreenShotListenManagerBelowAndroid14(context.getApplicationContext());
-        }
+    private static volatile ScreenShotListenManagerBelowAndroid14 screenShotListenManager;
 
+    public static ScreenShotListenManagerBelowAndroid14 getInstance(Context context) {
+        if (screenShotListenManager == null) {
+            synchronized (ScreenShotListenManagerBelowAndroid14.class) {
+                if (screenShotListenManager == null) {
+                    screenShotListenManager = new ScreenShotListenManagerBelowAndroid14(context.getApplicationContext());
+                }
+            }
+        }
         return screenShotListenManager;
     }
 
-    /**
-     * 启动监听
-     */
-    public void startListen() {
-        assertInMainThread();
+    private void ensureWorkHandler() {
+        if (mWorkThread != null && mWorkThread.isAlive() && mWorkHandler != null) {
+            return;
+        }
+        mWorkThread = new HandlerThread("ScreenshotObserver");
+        mWorkThread.start();
+        mWorkHandler = new Handler(mWorkThread.getLooper());
+    }
 
+    private void quitWorkHandler() {
+        if (mWorkHandler != null) {
+            mWorkHandler.removeCallbacksAndMessages(null);
+            mWorkHandler = null;
+        }
+        if (mWorkThread != null) {
+            mWorkThread.quitSafely();
+            mWorkThread = null;
+        }
+    }
+
+    /**
+     * 启动监听。可在任意线程调用；MediaStore 查询在工作线程，业务回调回到主线程。
+     */
+    public synchronized void startListen() {
 //        sHasCallbackPaths.clear();
 
         // 记录开始监听的时间戳
         mStartListenTime = System.currentTimeMillis();
+        mListening = true;
 
-        // 创建内容观察者
-        //mInternalObserver = new MediaContentObserver(MediaStore.Images.Media.INTERNAL_CONTENT_URI, mUiHandler);
-        mExternalObserver = new MediaContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, mUiHandler);
+        // 避免重复 startListen 叠加多个 Observer
+        if (mExternalObserver != null) {
+            try {
+                mContext.getContentResolver().unregisterContentObserver(mExternalObserver);
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+            mExternalObserver = null;
+        }
+        if (mInternalObserver != null) {
+            try {
+                mContext.getContentResolver().unregisterContentObserver(mInternalObserver);
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+            mInternalObserver = null;
+        }
+
+        ensureWorkHandler();
+
+        // 创建内容观察者（Handler 绑定工作线程，onChange/query 不在主线程执行）
+        //mInternalObserver = new MediaContentObserver(MediaStore.Images.Media.INTERNAL_CONTENT_URI, mWorkHandler);
+        mExternalObserver = new MediaContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, mWorkHandler);
 
         //Android Q(10) ContentObserver 不回调 onChange这篇文章提供的解决方法：
         // 在Android Q版本上调用注册媒体数据库监听的方法registerContentObserver时传入 notifyForDescendants参数值改为 true，
@@ -153,10 +207,10 @@ public class ScreenShotListenManagerBelowAndroid14 {
     }
 
     /**
-     * 停止监听
+     * 停止监听。可在任意线程调用。
      */
-    public void stopListen() {
-        assertInMainThread();
+    public synchronized void stopListen() {
+        mListening = false;
 
         // 注销内容观察者
         if (mInternalObserver != null) {
@@ -176,6 +230,9 @@ public class ScreenShotListenManagerBelowAndroid14 {
             mExternalObserver = null;
         }
 
+        quitWorkHandler();
+        mUiHandler.removeCallbacksAndMessages(null);
+
         // 清空数据
         mStartListenTime = 0;
 //        sHasCallbackPaths.clear();
@@ -184,51 +241,74 @@ public class ScreenShotListenManagerBelowAndroid14 {
         mListener = null;
     }
 
-    /**
-     * 处理媒体数据库的内容改变
-     */
-    private void handleMediaContentChange(Uri contentUri) {
-        Cursor cursor = null;
-        try {
-            // 数据改变时查询数据库中最后加入的一条数据
-            //IllegalArgumentException: Invalid token limit
-            //From Android 11, LIMIT and OFFSET should be retrieved using Bundle by
-            //public Cursor query (Uri uri,
-            //                String[] projection,
-            //                Bundle queryArgs,
-            //                CancellationSignal cancellationSignal)
- /*           if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R){
-                Bundle queryArgs = new Bundle();
-                queryArgs.putInt(ContentResolver.QUERY_ARG_OFFSET, 0);
-                //queryArgs.putInt(ContentResolver.QUERY_ARG_LIMIT, 1);
-                queryArgs.putString(ContentResolver.QUERY_ARG_SORT_COLUMNS, MediaStore.Images.Media._ID);
-                queryArgs.putInt(ContentResolver.QUERY_ARG_SORT_DIRECTION, ContentResolver.QUERY_SORT_DIRECTION_DESCENDING);
-                cursor = mContext.getContentResolver().query(
-                        contentUri,
-                        MEDIA_PROJECTIONS_API_16,
-                        queryArgs,
-                        null
-                );
-            }else {
-                cursor = mContext.getContentResolver().query(
-                        contentUri,
-                         MEDIA_PROJECTIONS_API_16,
-                        null,
-                        null,
-                        MediaStore.Images.ImageColumns._ID + " desc"
-                );
-            }*/
+    /** 业务回调抛回主线程；已 stop 则不再投递 */
+    private void notifyShot(final String imagePath, final boolean sure) {
+        if (!mListening) {
+            return;
+        }
+        mUiHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (!mListening) {
+                    return;
+                }
+                OnScreenShotListener listener = mListener;
+                if (listener != null) {
+                    listener.onShot(imagePath, sure);
+                }
+            }
+        });
+    }
 
-            cursor = mContext.getContentResolver().query(
+    /**
+     * 只取最新一条，减轻 MediaProvider / Binder 耗时。
+     * Android 11+ 用 QUERY_ARG_LIMIT；更低版本尝试 SQL LIMIT，不支持则回退。
+     */
+    private Cursor queryLatestImage(Uri contentUri) {
+        ContentResolver resolver = mContext.getContentResolver();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Bundle args = new Bundle();
+            args.putInt(ContentResolver.QUERY_ARG_LIMIT, 1);
+            args.putStringArray(ContentResolver.QUERY_ARG_SORT_COLUMNS,
+                    new String[]{MediaStore.Images.ImageColumns._ID});
+            args.putInt(ContentResolver.QUERY_ARG_SORT_DIRECTION,
+                    ContentResolver.QUERY_SORT_DIRECTION_DESCENDING);
+            return resolver.query(contentUri, MEDIA_PROJECTIONS_API_16, args, null);
+        }
+        try {
+            return resolver.query(
                     contentUri,
                     MEDIA_PROJECTIONS_API_16,
                     null,
                     null,
-                    MediaStore.Images.ImageColumns._ID + " desc"
-                    //IllegalArgumentException: Invalid token limit
+                    MediaStore.Images.ImageColumns._ID + " DESC LIMIT 1"
             );
+        } catch (IllegalArgumentException e) {
+            // 部分 ROM 不认 LIMIT token
+            return resolver.query(
+                    contentUri,
+                    MEDIA_PROJECTIONS_API_16,
+                    null,
+                    null,
+                    MediaStore.Images.ImageColumns._ID + " DESC"
+            );
+        }
+    }
 
+    /**
+     * 处理媒体数据库的内容改变
+     */
+    private void handleMediaContentChange(Uri contentUri) {
+        if (!mListening) {
+            return;
+        }
+        Cursor cursor = null;
+        try {
+            cursor = queryLatestImage(contentUri);
 
+            if (!mListening) {
+                return;
+            }
             if (cursor == null) {
                 if(isAppDebuggable()){
                     Log.e(TAG, "Deviant logic. cursor == null");
@@ -240,15 +320,16 @@ public class ScreenShotListenManagerBelowAndroid14 {
                     Log.d(TAG, "Cursor no data. 大概率是因为没有权限");
                 }
 
-                if (mListener != null && !checkCallback("")) {
-                    mListener.onShot(null,false);
-                    new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                if (mListening && mListener != null && !checkCallback("")) {
+                    notifyShot(null, false);
+                    mUiHandler.postDelayed(new Runnable() {
                         @Override
                         public void run() {
-                            sHasCallbackPaths.remove("");
+                            synchronized (sHasCallbackPaths) {
+                                sHasCallbackPaths.remove("");
+                            }
                         }
-                    },2000);
-
+                    }, 2000);
                 }
                 return;
             }
@@ -310,8 +391,8 @@ public class ScreenShotListenManagerBelowAndroid14 {
                         + "; date = " + dateTaken);
             }
 
-            if (mListener != null && !checkCallback(data)) {
-                mListener.onShot(data,true);
+            if (mListening && mListener != null && !checkCallback(data)) {
+                notifyShot(data, true);
             }
         } else {
             // 如果在观察区间媒体数据库有数据改变，又不符合截屏规则，则输出到 log 待分析
@@ -399,21 +480,23 @@ public class ScreenShotListenManagerBelowAndroid14 {
      * 删除一个图片也会发通知, 同时防止删除图片时误将上一张符合截屏规则的图片当做是当前截屏.
      */
     private boolean checkCallback(String imagePath) {
-        if (sHasCallbackPaths.contains(imagePath)) {
-            if(isAppDebuggable()){
-                Log.d(TAG, "ScreenShot: imgPath has done"
-                        + "; imagePath = " + imagePath);
+        synchronized (sHasCallbackPaths) {
+            if (sHasCallbackPaths.contains(imagePath)) {
+                if (isAppDebuggable()) {
+                    Log.d(TAG, "ScreenShot: imgPath has done"
+                            + "; imagePath = " + imagePath);
+                }
+                return true;
             }
-            return true;
-        }
-        // 大概缓存15~20条记录便可
-        if (sHasCallbackPaths.size() >= 20) {
-            for (int i = 0; i < 5; i++) {
-                sHasCallbackPaths.remove(0);
+            // 大概缓存15~20条记录便可
+            if (sHasCallbackPaths.size() >= 20) {
+                for (int i = 0; i < 5; i++) {
+                    sHasCallbackPaths.remove(0);
+                }
             }
+            sHasCallbackPaths.add(imagePath);
+            return false;
         }
-        sHasCallbackPaths.add(imagePath);
-        return false;
     }
 
     /**
@@ -454,7 +537,7 @@ public class ScreenShotListenManagerBelowAndroid14 {
     }
 
     /**
-     * 设置截屏监听器
+     * 设置截屏监听器。可在任意线程调用；回调一律抛到主线程。
      */
     public void setListener(OnScreenShotListener listener) {
         mListener = listener;
@@ -462,17 +545,6 @@ public class ScreenShotListenManagerBelowAndroid14 {
 
     public interface OnScreenShotListener {
         void onShot(String imagePath,boolean sure);
-    }
-
-    private static void assertInMainThread() {
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            StackTraceElement[] elements = Thread.currentThread().getStackTrace();
-            String methodMsg = null;
-            if (elements != null && elements.length >= 4) {
-                methodMsg = elements[3].toString();
-            }
-            throw new IllegalStateException("Call the method must be in main thread: " + methodMsg);
-        }
     }
 
     /**
@@ -490,6 +562,9 @@ public class ScreenShotListenManagerBelowAndroid14 {
         @Override
         public void onChange(boolean selfChange) {
             super.onChange(selfChange);
+            if (!mListening) {
+                return;
+            }
             if(isAppDebuggable()){
                 Log.d("MediaContent","监测到MediaContent change: selfChange:"+selfChange+", " +mContentUri+", " +this.toString());
             }
